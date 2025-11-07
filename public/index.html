@@ -12,6 +12,16 @@
     button { padding: 8px 12px; margin-top: 10px; }
     pre { background: #f5f5f5; padding: 12px; white-space: pre-wrap; border: 1px solid #ddd; margin-top: 16px; }
     .status { margin-top: 8px; color: #666; }
+    .list { margin-top: 16px; }
+    .repo { border: 1px solid #ddd; padding: 10px; margin-bottom: 12px; }
+    .repo .path { font-weight: 600; }
+    .badge { display: inline-block; padding: 2px 8px; margin-left: 8px; border-radius: 12px; font-size: 12px; color: #fff; }
+    .badge.pull { background: #0a66cc; }
+    .badge.success { background: #128a0c; }
+    .badge.failed { background: #d32f2f; }
+    .badge.skipped { background: #6c757d; }
+    .log { background: #fafafa; border: 1px dashed #ddd; padding: 8px; margin-top: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
+    .summary { margin-top: 20px; padding: 10px; background: #f3f7ff; border: 1px solid #cfe2ff; }
   </style>
   </head>
 <body>
@@ -20,14 +30,20 @@
   <input id="dir" type="text" placeholder="例如：D:\\code\\repos" />
   <div>
     <button id="run">执行拉取</button>
+    <button id="runStream">流式拉取</button>
     <span id="status" class="status"></span>
   </div>
   <pre id="output" aria-live="polite"></pre>
+  <div id="list" class="list"></div>
+  <div id="summary" class="summary" style="display:none"></div>
 <script>
   const $dir = document.getElementById('dir');
   const $run = document.getElementById('run');
+  const $runStream = document.getElementById('runStream');
   const $out = document.getElementById('output');
   const $status = document.getElementById('status');
+  const $list = document.getElementById('list');
+  const $summary = document.getElementById('summary');
 
   async function runFetch() {
     const directoryPath = $dir.value.trim();
@@ -53,6 +69,96 @@
   }
 
   $run.addEventListener('click', runFetch);
+
+  function createRepoEl(path) {
+    const wrap = document.createElement('div');
+    wrap.className = 'repo';
+    const header = document.createElement('div');
+    const pathEl = document.createElement('span');
+    pathEl.textContent = path;
+    pathEl.className = 'path';
+    const badge = document.createElement('span');
+    badge.className = 'badge pull';
+    badge.textContent = '拉取中';
+    header.appendChild(pathEl);
+    header.appendChild(badge);
+    const log = document.createElement('div');
+    log.className = 'log';
+    wrap.appendChild(header);
+    wrap.appendChild(log);
+    $list.appendChild(wrap);
+    return { wrap, badge, log };
+  }
+
+  function setBadge(badge, status){
+    badge.className = 'badge ' + status;
+    const map = { pull: '拉取中', success: '成功', failed: '失败', skipped: '跳过' };
+    badge.textContent = map[status] || status;
+  }
+
+  function appendLine(logEl, text){
+    const div = document.createElement('div');
+    div.textContent = text;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function resetUI(){
+    $list.innerHTML = '';
+    $summary.style.display = 'none';
+    $summary.textContent = '';
+    $out.textContent = '';
+  }
+
+  function runStream(){
+    const directoryPath = $dir.value.trim();
+    if (!directoryPath) { alert('请输入目标根目录路径'); return; }
+    resetUI();
+    $status.textContent = '流式运行中...';
+    const url = '/fetch-stream?dir=' + encodeURIComponent(directoryPath);
+    const es = new EventSource(url);
+    const repoMap = new Map();
+
+    es.addEventListener('start', e => {
+      const data = JSON.parse(e.data);
+      appendLine($out, '开始：' + (data.dir || ''));
+    });
+    es.addEventListener('repo-start', e => {
+      const { path } = JSON.parse(e.data);
+      const el = createRepoEl(path);
+      repoMap.set(path, el);
+    });
+    es.addEventListener('repo-log', e => {
+      const { path, line, stream } = JSON.parse(e.data);
+      const el = repoMap.get(path);
+      if (!el) return;
+      appendLine(el.log, (stream === 'stderr' ? '[ERR] ' : '') + line);
+    });
+    es.addEventListener('repo-status', e => {
+      const { path, status } = JSON.parse(e.data);
+      const el = repoMap.get(path);
+      if (!el) return;
+      setBadge(el.badge, status);
+    });
+    es.addEventListener('summary', e => {
+      const { success, failed, skipped } = JSON.parse(e.data);
+      $summary.style.display = 'block';
+      $summary.textContent = `统计：成功 ${success}，失败 ${failed}，跳过 ${skipped}`;
+    });
+    es.addEventListener('error', e => {
+      try { const data = JSON.parse(e.data); appendLine($out, '错误：' + (data.message || '')); } catch {}
+    });
+    es.addEventListener('done', () => {
+      $status.textContent = '完成';
+      es.close();
+    });
+
+    es.onerror = (err) => {
+      $status.textContent = '失败';
+    };
+  }
+
+  $runStream.addEventListener('click', runStream);
 </script>
 </body>
 </html>
