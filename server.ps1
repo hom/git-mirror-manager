@@ -35,79 +35,145 @@ function Send-SseEvent([System.Net.HttpListenerResponse]$resp, [string]$eventNam
 
 function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir) {
     $success = 0; $failed = 0; $skipped = 0; $cancelled = $false
+    $script:currentResponse = $resp
 
-    function Process-Folder([System.IO.DirectoryInfo]$folder) {
-        $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
-        if ($script:cancelFlag) { $cancelled = $true; return }
-        if (Test-Path -Path $gitPath) {
-            Send-SseEvent $resp 'repo-start' @{ path = $folder.FullName }
-            # Detect branch
-            $branch = (& git -C $folder.FullName branch --show-current).Trim()
-            if (-not $branch -or [string]::IsNullOrWhiteSpace($branch)) {
-                $branch = (& git -C $folder.FullName rev-parse --abbrev-ref HEAD).Trim()
-            }
-            if ($branch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($branch)) {
-                $skipped++
-                Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'skipped'; reason = 'detached HEAD or no branch' }
-                return
-            }
-
-            # Run git pull with streaming logs
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'git'
-            $pathQuoted = '"' + $folder.FullName + '"'
-            $branchQuoted = '"' + $branch + '"'
-            $psi.Arguments = "-C $pathQuoted pull origin $branchQuoted --rebase"
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $psi.CreateNoWindow = $true
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $psi
-            [void]$proc.Start()
-
-            # Asynchronously read output to avoid blocking and stream in real-time
-            $repoPath = $folder.FullName
-            $subOut = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData @{ resp = $response; path = $repoPath } -Action {
-                param($sender, $eventArgs)
-                $resp = $event.MessageData.resp
-                $path = $event.MessageData.path
-                $line = $eventArgs.Data
-                if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $path; stream = 'stdout'; line = $line } }
-            }
-            $subErr = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData @{ resp = $response; path = $repoPath } -Action {
-                param($sender, $eventArgs)
-                $resp = $event.MessageData.resp
-                $path = $event.MessageData.path
-                $line = $eventArgs.Data
-                if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $path; stream = 'stderr'; line = $line } }
-            }
-
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
-            while (-not $proc.HasExited) {
-                if ($script:cancelFlag) { $cancelled = $true; try { $proc.Kill() } catch {} break }
-                Start-Sleep -Milliseconds 100
-            }
-
-            if ($subOut) { Unregister-Event -SubscriptionId $subOut.Id }
-            if ($subErr) { Unregister-Event -SubscriptionId $subErr.Id }
-
-            if ($cancelled) { $skipped++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'cancelled' } }
-            else {
-                $exit = $proc.ExitCode
-                if ($exit -eq 0) { $success++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'success' } }
-                else { $failed++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'failed'; exitCode = $exit } }
-            }
-            $proc.Close()
-        } else {
-            foreach ($sub in $folder.GetDirectories()) { if ($script:cancelFlag) { $cancelled = $true; break }; Process-Folder $sub }
+    function Send-Log([string]$path, [string]$line, [string]$stream = 'stdout') {
+        try {
+            Send-SseEvent $script:currentResponse 'repo-log' @{ path = $path; stream = $stream; line = $line }
+        } catch {
+            Write-Host "Failed to send log: $_"
         }
     }
 
-    foreach ($top in (Get-ChildItem -Path $rootDir -Directory)) { if ($script:cancelFlag) { $cancelled = $true; break }; Process-Folder $top }
+    function Process-Folder([System.IO.DirectoryInfo]$folder) {
+        $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
+        if ($script:cancelFlag) { $script:cancelled = $true; return }
+        
+        if (Test-Path -Path $gitPath) {
+            $repoPath = $folder.FullName
+            Send-SseEvent $resp 'repo-start' @{ path = $repoPath }
+            
+            try {
+                # Check if repo has uncommitted changes
+                $status = & git -C $repoPath status --porcelain 2>&1
+                if ($status -and $status.Length -gt 0) {
+                    Send-Log $repoPath "检测到未提交的更改，跳过拉取" "stderr"
+                    $script:skipped++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'uncommitted changes' }
+                    return
+                }
+
+                # Detect current branch
+                $branch = (& git -C $repoPath branch --show-current 2>&1).Trim()
+                if (-not $branch -or [string]::IsNullOrWhiteSpace($branch)) {
+                    $branch = (& git -C $repoPath rev-parse --abbrev-ref HEAD 2>&1).Trim()
+                }
+                
+                if ($branch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($branch)) {
+                    Send-Log $repoPath "分离的 HEAD 状态，跳过" "stderr"
+                    $script:skipped++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'detached HEAD' }
+                    return
+                }
+
+                Send-Log $repoPath "当前分支: $branch"
+                
+                # Check if remote exists
+                $remotes = & git -C $repoPath remote 2>&1
+                if (-not $remotes -or $remotes.Length -eq 0) {
+                    Send-Log $repoPath "没有配置远程仓库，跳过" "stderr"
+                    $script:skipped++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'no remote' }
+                    return
+                }
+
+                # Run git fetch first
+                Send-Log $repoPath "正在执行 git fetch..."
+                $fetchOutput = & git -C $repoPath fetch origin 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Send-Log $repoPath "Fetch 失败: $fetchOutput" "stderr"
+                    $script:failed++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; reason = 'fetch failed' }
+                    return
+                }
+                
+                foreach ($line in $fetchOutput) {
+                    if ($line) { Send-Log $repoPath $line }
+                }
+
+                if ($script:cancelFlag) { $script:cancelled = $true; return }
+
+                # Check if pull is needed
+                $localCommit = (& git -C $repoPath rev-parse $branch 2>&1).Trim()
+                $remoteCommit = (& git -C $repoPath rev-parse "origin/$branch" 2>&1).Trim()
+                
+                if ($localCommit -eq $remoteCommit) {
+                    Send-Log $repoPath "已是最新，无需拉取"
+                    $script:success++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'success'; upToDate = $true }
+                    return
+                }
+
+                # Run git pull with rebase
+                Send-Log $repoPath "正在执行 git pull --rebase..."
+                $pullOutput = & git -C $repoPath pull origin $branch --rebase 2>&1
+                $exitCode = $LASTEXITCODE
+                
+                foreach ($line in $pullOutput) {
+                    if ($line) { 
+                        $isError = $exitCode -ne 0
+                        Send-Log $repoPath $line $(if ($isError) { "stderr" } else { "stdout" })
+                    }
+                }
+
+                if ($script:cancelFlag) { 
+                    $script:cancelled = $true
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'cancelled' }
+                    return
+                }
+
+                if ($exitCode -eq 0) {
+                    Send-Log $repoPath "✓ 拉取成功"
+                    $script:success++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'success' }
+                } else {
+                    Send-Log $repoPath "✗ 拉取失败 (退出码: $exitCode)" "stderr"
+                    $script:failed++
+                    Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; exitCode = $exitCode }
+                }
+            } catch {
+                Send-Log $repoPath "异常: $($_.Exception.Message)" "stderr"
+                $script:failed++
+                Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; error = $_.Exception.Message }
+            }
+        } else {
+            # Recursively process subdirectories
+            try {
+                $subdirs = $folder.GetDirectories()
+                foreach ($sub in $subdirs) { 
+                    if ($script:cancelFlag) { $script:cancelled = $true; break }
+                    Process-Folder $sub 
+                }
+            } catch {
+                Write-Host "Error accessing directory $($folder.FullName): $_"
+            }
+        }
+    }
+
+    try {
+        $topDirs = Get-ChildItem -Path $rootDir -Directory -ErrorAction SilentlyContinue
+        foreach ($top in $topDirs) { 
+            if ($script:cancelFlag) { $script:cancelled = $true; break }
+            Process-Folder $top 
+        }
+    } catch {
+        Send-SseEvent $resp 'error' @{ message = "Error processing root directory: $($_.Exception.Message)" }
+    }
+
     Send-SseEvent $resp 'summary' @{ root = $rootDir; success = $success; failed = $failed; skipped = $skipped }
-    if ($cancelled -or $script:cancelFlag) { Send-SseEvent $resp 'cancelled' @{ root = $rootDir; ts = (Get-Date).ToString('o') } }
+    if ($cancelled -or $script:cancelFlag) { 
+        Send-SseEvent $resp 'cancelled' @{ root = $rootDir; ts = (Get-Date).ToString('o') } 
+    }
 }
 
 while ($true) {
