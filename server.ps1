@@ -130,22 +130,8 @@ while ($true) {
         # Pick folder dialog endpoint (local UI on server host)
         if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/pick-folder") {
             try {
-                Add-Type -AssemblyName System.Windows.Forms
-                $selectedPath = $null
-                $state = New-Object PSObject -Property @{ SelectedPath = $null }
-                $thread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
-                    param($st)
-                    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-                    $dlg.Description = "选择根目录"
-                    $dlg.ShowNewFolderButton = $false
-                    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                        $st.SelectedPath = $dlg.SelectedPath
-                    }
-                })
-                $thread.SetApartmentState([System.Threading.ApartmentState]::STA)
-                $thread.Start($state)
-                $thread.Join()
-                $selectedPath = $state.SelectedPath
+                $cmd = 'Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; $dlg.Description = "选择根目录"; $dlg.ShowNewFolderButton = $false; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }'
+                $selectedPath = (powershell -STA -NoProfile -ExecutionPolicy Bypass -Command $cmd | Select-Object -First 1)
                 $payload = @{ directoryPath = $selectedPath }
                 $json = ConvertTo-Json $payload -Compress
                 Send-TextResponse $response $json 200 "application/json; charset=utf-8"
