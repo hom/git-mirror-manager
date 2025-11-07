@@ -99,7 +99,7 @@ function Run-Fetch($folder)
             $subdirs = $folder.GetDirectories()
             Map-Fetch $subdirs
         } catch {
-            Write-Host "Error accessing directory $($folder.FullName): $_"
+            Write-Output "Error accessing directory $($folder.FullName): $_"
         }
     }
 }
@@ -119,7 +119,7 @@ Map-Fetch (Get-ChildItem -Path $directoryPath -Directory -ErrorAction SilentlyCo
 $endTime = Get-Date
 $elapsed = ($endTime - $startTime).TotalSeconds
 
-Write-Output "`n========================================"
+Write-Output "========================================"
 Write-Output "📊 统计信息"
 Write-Output "========================================"
 Write-Output "✓ 成功: $($script:successCount)"
@@ -127,4 +127,4 @@ Write-Output "❌ 失败: $($script:failedCount)"
 Write-Output "⚠️  跳过: $($script:skippedCount)"
 Write-Output "📁 总计: $($script:successCount + $script:failedCount + $script:skippedCount)"
 Write-Output "⏱️  耗时: $([math]::Round($elapsed, 2)) 秒"
-Write-Output "========================================`n"
+Write-Output "========================================"

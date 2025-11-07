@@ -197,19 +197,22 @@ while ($true) {
         if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/pick-folder") {
             Write-Host "Folder picker requested..."
             try {
-                # Create a temporary script file to run the dialog with visible window
+                # Create a temporary script file with proper encoding
                 $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
                 $scriptContent = @'
-# Use Shell.Application COM object for folder picker
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $shell = New-Object -ComObject Shell.Application
-$folder = $shell.BrowseForFolder(0, "选择包含 Git 仓库的根目录", 0, 0)
+$folder = $shell.BrowseForFolder(0, "Select root directory containing Git repositories", 0, 0)
 if ($folder) {
     $folder.Self.Path
 }
 '@
-                [System.IO.File]::WriteAllText($tempScript, $scriptContent, [System.Text.Encoding]::UTF8)
+                # Write with UTF8 BOM for better compatibility
+                $utf8WithBom = New-Object System.Text.UTF8Encoding $true
+                [System.IO.File]::WriteAllText($tempScript, $scriptContent, $utf8WithBom)
                 
-                # Run the dialog with visible window (UseShellExecute = $true)
+                # Run the dialog with proper encoding settings
                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                 $psi.FileName = "powershell.exe"
                 $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$tempScript`""
@@ -217,6 +220,8 @@ if ($folder) {
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError = $true
                 $psi.CreateNoWindow = $false
+                $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
                 
                 $proc = [System.Diagnostics.Process]::Start($psi)
                 $selectedPath = $proc.StandardOutput.ReadToEnd().Trim()
