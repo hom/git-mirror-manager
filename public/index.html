@@ -31,6 +31,7 @@
   <div>
     <button id="run">执行拉取</button>
     <button id="runStream">流式拉取</button>
+    <button id="stop" disabled>停止</button>
     <span id="status" class="status"></span>
   </div>
   <pre id="output" aria-live="polite"></pre>
@@ -40,6 +41,7 @@
   const $dir = document.getElementById('dir');
   const $run = document.getElementById('run');
   const $runStream = document.getElementById('runStream');
+  const $stop = document.getElementById('stop');
   const $out = document.getElementById('output');
   const $status = document.getElementById('status');
   const $list = document.getElementById('list');
@@ -115,8 +117,11 @@
     if (!directoryPath) { alert('请输入目标根目录路径'); return; }
     resetUI();
     $status.textContent = '流式运行中...';
+    $run.disabled = true; $runStream.disabled = true; $stop.disabled = false;
     const url = '/fetch-stream?dir=' + encodeURIComponent(directoryPath);
+    window.__es && window.__es.close();
     const es = new EventSource(url);
+    window.__es = es;
     const repoMap = new Map();
 
     es.addEventListener('start', e => {
@@ -151,6 +156,12 @@
     es.addEventListener('done', () => {
       $status.textContent = '完成';
       es.close();
+      $run.disabled = false; $runStream.disabled = false; $stop.disabled = true;
+    });
+    es.addEventListener('cancelled', () => {
+      $status.textContent = '已停止';
+      es.close();
+      $run.disabled = false; $runStream.disabled = false; $stop.disabled = true;
     });
 
     es.onerror = (err) => {
@@ -159,6 +170,16 @@
   }
 
   $runStream.addEventListener('click', runStream);
+
+  async function stop(){
+    try {
+      $status.textContent = '停止中...';
+      await fetch('/cancel', { method: 'POST' });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  $stop.addEventListener('click', stop);
 </script>
 </body>
 </html>

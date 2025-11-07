@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+$script:cancelFlag = $false
+
 $prefix = "http://localhost:8080/"
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Clear()
@@ -32,10 +34,11 @@ function Send-SseEvent([System.Net.HttpListenerResponse]$resp, [string]$eventNam
 }
 
 function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir) {
-    $success = 0; $failed = 0; $skipped = 0
+    $success = 0; $failed = 0; $skipped = 0; $cancelled = $false
 
     function Process-Folder([System.IO.DirectoryInfo]$folder) {
         $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
+        if ($script:cancelFlag) { $cancelled = $true; return }
         if (Test-Path -Path $gitPath) {
             Send-SseEvent $resp 'repo-start' @{ path = $folder.FullName }
             # Detect branch
@@ -63,35 +66,48 @@ function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir)
             $proc.StartInfo = $psi
             [void]$proc.Start()
 
-            $outReader = $proc.StandardOutput
-            $errReader = $proc.StandardError
-
-            while (-not $proc.HasExited) {
-                while (-not $outReader.EndOfStream) {
-                    $line = $outReader.ReadLine()
-                    if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $folder.FullName; stream = 'stdout'; line = $line } }
-                }
-                while (-not $errReader.EndOfStream) {
-                    $line = $errReader.ReadLine()
-                    if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $folder.FullName; stream = 'stderr'; line = $line } }
-                }
-                Start-Sleep -Milliseconds 50
+            # Asynchronously read output to avoid blocking and stream in real-time
+            $repoPath = $folder.FullName
+            $subOut = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData @{ resp = $response; path = $repoPath } -Action {
+                param($sender, $eventArgs)
+                $resp = $event.MessageData.resp
+                $path = $event.MessageData.path
+                $line = $eventArgs.Data
+                if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $path; stream = 'stdout'; line = $line } }
             }
-            # Drain remaining
-            while (-not $outReader.EndOfStream) { $line = $outReader.ReadLine(); if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $folder.FullName; stream = 'stdout'; line = $line } } }
-            while (-not $errReader.EndOfStream) { $line = $errReader.ReadLine(); if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $folder.FullName; stream = 'stderr'; line = $line } } }
+            $subErr = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData @{ resp = $response; path = $repoPath } -Action {
+                param($sender, $eventArgs)
+                $resp = $event.MessageData.resp
+                $path = $event.MessageData.path
+                $line = $eventArgs.Data
+                if ($line) { Send-SseEvent $resp 'repo-log' @{ path = $path; stream = 'stderr'; line = $line } }
+            }
 
-            $exit = $proc.ExitCode
-            if ($exit -eq 0) { $success++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'success' } }
-            else { $failed++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'failed'; exitCode = $exit } }
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
+            while (-not $proc.HasExited) {
+                if ($script:cancelFlag) { $cancelled = $true; try { $proc.Kill() } catch {} break }
+                Start-Sleep -Milliseconds 100
+            }
+
+            if ($subOut) { Unregister-Event -SubscriptionId $subOut.Id }
+            if ($subErr) { Unregister-Event -SubscriptionId $subErr.Id }
+
+            if ($cancelled) { $skipped++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'cancelled' } }
+            else {
+                $exit = $proc.ExitCode
+                if ($exit -eq 0) { $success++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'success' } }
+                else { $failed++; Send-SseEvent $resp 'repo-status' @{ path = $folder.FullName; status = 'failed'; exitCode = $exit } }
+            }
             $proc.Close()
         } else {
-            foreach ($sub in $folder.GetDirectories()) { Process-Folder $sub }
+            foreach ($sub in $folder.GetDirectories()) { if ($script:cancelFlag) { $cancelled = $true; break }; Process-Folder $sub }
         }
     }
 
-    foreach ($top in (Get-ChildItem -Path $rootDir -Directory)) { Process-Folder $top }
+    foreach ($top in (Get-ChildItem -Path $rootDir -Directory)) { if ($script:cancelFlag) { $cancelled = $true; break }; Process-Folder $top }
     Send-SseEvent $resp 'summary' @{ root = $rootDir; success = $success; failed = $failed; skipped = $skipped }
+    if ($cancelled -or $script:cancelFlag) { Send-SseEvent $resp 'cancelled' @{ root = $rootDir; ts = (Get-Date).ToString('o') } }
 }
 
 while ($true) {
@@ -111,6 +127,12 @@ while ($true) {
             continue
         }
 
+        if ($request.HttpMethod -eq "POST" -and $request.Url.AbsolutePath -eq "/cancel") {
+            $script:cancelFlag = $true
+            Send-TextResponse $response "OK" 200 "text/plain; charset=utf-8"
+            continue
+        }
+
         if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/fetch-stream") {
             $dir = $request.QueryString["dir"]
             if (-not $dir -or [string]::IsNullOrWhiteSpace($dir)) {
@@ -123,6 +145,7 @@ while ($true) {
                 $response.OutputStream.Close()
                 continue
             }
+            $script:cancelFlag = $false
             Send-SseEvent $response 'start' @{ dir = $dir; ts = (Get-Date).ToString('o') }
             Walk-And-Pull -resp $response -rootDir $dir
             Send-SseEvent $response 'done' @{ ts = (Get-Date).ToString('o') }
