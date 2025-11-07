@@ -31,6 +31,19 @@ function Send-SseEvent([System.Net.HttpListenerResponse]$resp, [string]$eventNam
 }
 
 function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir) {
+    # Set encoding for git output
+    $originalEncoding = $null
+    try {
+        $originalEncoding = [Console]::OutputEncoding
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    } catch {
+        Write-Host "Warning: Could not set console encoding"
+    }
+    
+    try {
+        $env:LANG = "en_US.UTF-8"
+    } catch {}
+    
     $success = 0; $failed = 0; $skipped = 0; $cancelled = $false
     $script:currentResponse = $resp
 
@@ -43,6 +56,7 @@ function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir)
     }
 
     function Process-Folder([System.IO.DirectoryInfo]$folder) {
+        if (-not $folder) { return }
         $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
         if ($script:cancelFlag) { $script:cancelled = $true; return }
         
@@ -51,75 +65,95 @@ function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir)
             Send-SseEvent $resp 'repo-start' @{ path = $repoPath }
             
             try {
+                # Configure git to use UTF-8
+                try {
+                    & git -C $repoPath config --local core.quotepath false 2>&1 | Out-Null
+                } catch {}
+                
                 # Check if repo has uncommitted changes
-                $status = & git -C $repoPath status --porcelain 2>&1
-                if ($status -and $status.Length -gt 0) {
-                    Send-Log $repoPath "检测到未提交的更改，跳过拉取" "stderr"
+                $status = @(& git -C $repoPath status --porcelain 2>&1)
+                if ($status -and $status.Count -gt 0) {
+                    Send-Log $repoPath "Uncommitted changes detected, skipping" "stderr"
                     $script:skipped++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'uncommitted changes' }
                     return
                 }
 
                 # Detect current branch
-                $branch = (& git -C $repoPath branch --show-current 2>&1).Trim()
+                $branchResult = & git -C $repoPath branch --show-current 2>&1
+                $branch = if ($branchResult) { $branchResult.ToString().Trim() } else { "" }
+                
                 if (-not $branch -or [string]::IsNullOrWhiteSpace($branch)) {
-                    $branch = (& git -C $repoPath rev-parse --abbrev-ref HEAD 2>&1).Trim()
+                    $branchResult = & git -C $repoPath rev-parse --abbrev-ref HEAD 2>&1
+                    $branch = if ($branchResult) { $branchResult.ToString().Trim() } else { "" }
                 }
                 
-                if ($branch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($branch)) {
-                    Send-Log $repoPath "分离的 HEAD 状态，跳过" "stderr"
+                if (-not $branch -or $branch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($branch)) {
+                    Send-Log $repoPath "Detached HEAD state, skipping" "stderr"
                     $script:skipped++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'detached HEAD' }
                     return
                 }
 
-                Send-Log $repoPath "当前分支: $branch"
+                Send-Log $repoPath "Current branch: $branch"
                 
                 # Check if remote exists
-                $remotes = & git -C $repoPath remote 2>&1
-                if (-not $remotes -or $remotes.Length -eq 0) {
-                    Send-Log $repoPath "没有配置远程仓库，跳过" "stderr"
+                $remotes = @(& git -C $repoPath remote 2>&1)
+                if (-not $remotes -or $remotes.Count -eq 0) {
+                    Send-Log $repoPath "No remote configured, skipping" "stderr"
                     $script:skipped++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'skipped'; reason = 'no remote' }
                     return
                 }
 
                 # Run git fetch first
-                Send-Log $repoPath "正在执行 git fetch..."
-                $fetchOutput = & git -C $repoPath fetch origin 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                    Send-Log $repoPath "Fetch 失败: $fetchOutput" "stderr"
+                Send-Log $repoPath "Running git fetch..."
+                $fetchOutput = @(& git -C $repoPath fetch origin 2>&1)
+                $fetchExitCode = $LASTEXITCODE
+                
+                if ($fetchExitCode -ne 0) {
+                    $errorMsg = if ($fetchOutput) { $fetchOutput -join "`n" } else { "Unknown error" }
+                    Send-Log $repoPath "Fetch failed: $errorMsg" "stderr"
                     $script:failed++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; reason = 'fetch failed' }
                     return
                 }
                 
-                foreach ($line in $fetchOutput) {
-                    if ($line) { Send-Log $repoPath $line }
+                if ($fetchOutput -and $fetchOutput.Count -gt 0) {
+                    foreach ($line in $fetchOutput) {
+                        if ($line -and $line.ToString().Trim()) { 
+                            Send-Log $repoPath $line.ToString() 
+                        }
+                    }
                 }
 
                 if ($script:cancelFlag) { $script:cancelled = $true; return }
 
                 # Check if pull is needed
-                $localCommit = (& git -C $repoPath rev-parse $branch 2>&1).Trim()
-                $remoteCommit = (& git -C $repoPath rev-parse "origin/$branch" 2>&1).Trim()
+                $localResult = & git -C $repoPath rev-parse $branch 2>&1
+                $localCommit = if ($localResult) { $localResult.ToString().Trim() } else { "" }
                 
-                if ($localCommit -eq $remoteCommit) {
-                    Send-Log $repoPath "已是最新，无需拉取"
+                $remoteResult = & git -C $repoPath rev-parse "origin/$branch" 2>&1
+                $remoteCommit = if ($remoteResult) { $remoteResult.ToString().Trim() } else { "" }
+                
+                if ($localCommit -and $remoteCommit -and $localCommit -eq $remoteCommit) {
+                    Send-Log $repoPath "Already up to date"
                     $script:success++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'success'; upToDate = $true }
                     return
                 }
 
                 # Run git pull with rebase
-                Send-Log $repoPath "正在执行 git pull --rebase..."
-                $pullOutput = & git -C $repoPath pull origin $branch --rebase 2>&1
+                Send-Log $repoPath "Running git pull --rebase..."
+                $pullOutput = @(& git -C $repoPath pull origin $branch --rebase 2>&1)
                 $exitCode = $LASTEXITCODE
                 
-                foreach ($line in $pullOutput) {
-                    if ($line) { 
-                        $isError = $exitCode -ne 0
-                        Send-Log $repoPath $line $(if ($isError) { "stderr" } else { "stdout" })
+                if ($pullOutput -and $pullOutput.Count -gt 0) {
+                    foreach ($line in $pullOutput) {
+                        if ($line -and $line.ToString().Trim()) { 
+                            $isError = $exitCode -ne 0
+                            Send-Log $repoPath $line.ToString() $(if ($isError) { "stderr" } else { "stdout" })
+                        }
                     }
                 }
 
@@ -130,26 +164,29 @@ function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir)
                 }
 
                 if ($exitCode -eq 0) {
-                    Send-Log $repoPath "✓ 拉取成功"
+                    Send-Log $repoPath "Pull successful"
                     $script:success++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'success' }
                 } else {
-                    Send-Log $repoPath "✗ 拉取失败 (退出码: $exitCode)" "stderr"
+                    Send-Log $repoPath "Pull failed (exit code: $exitCode)" "stderr"
                     $script:failed++
                     Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; exitCode = $exitCode }
                 }
             } catch {
-                Send-Log $repoPath "异常: $($_.Exception.Message)" "stderr"
+                $errorMsg = if ($_.Exception.Message) { $_.Exception.Message } else { "Unknown error" }
+                Send-Log $repoPath "Exception: $errorMsg" "stderr"
                 $script:failed++
-                Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; error = $_.Exception.Message }
+                Send-SseEvent $resp 'repo-status' @{ path = $repoPath; status = 'failed'; error = $errorMsg }
             }
         } else {
             # Recursively process subdirectories
             try {
                 $subdirs = $folder.GetDirectories()
-                foreach ($sub in $subdirs) { 
-                    if ($script:cancelFlag) { $script:cancelled = $true; break }
-                    Process-Folder $sub 
+                if ($subdirs) {
+                    foreach ($sub in $subdirs) { 
+                        if ($script:cancelFlag) { $script:cancelled = $true; break }
+                        Process-Folder $sub 
+                    }
                 }
             } catch {
                 Write-Host "Error accessing directory $($folder.FullName): $_"
@@ -170,6 +207,13 @@ function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir)
     Send-SseEvent $resp 'summary' @{ root = $rootDir; success = $success; failed = $failed; skipped = $skipped }
     if ($cancelled -or $script:cancelFlag) { 
         Send-SseEvent $resp 'cancelled' @{ root = $rootDir; ts = (Get-Date).ToString('o') } 
+    }
+    
+    # Restore original encoding
+    if ($originalEncoding) {
+        try {
+            [Console]::OutputEncoding = $originalEncoding
+        } catch {}
     }
 }
 
