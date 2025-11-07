@@ -127,6 +127,34 @@ while ($true) {
             continue
         }
 
+        # Pick folder dialog endpoint (local UI on server host)
+        if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/pick-folder") {
+            try {
+                Add-Type -AssemblyName System.Windows.Forms
+                $selectedPath = $null
+                $state = New-Object PSObject -Property @{ SelectedPath = $null }
+                $thread = New-Object System.Threading.Thread([System.Threading.ParameterizedThreadStart]{
+                    param($st)
+                    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+                    $dlg.Description = "选择根目录"
+                    $dlg.ShowNewFolderButton = $false
+                    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                        $st.SelectedPath = $dlg.SelectedPath
+                    }
+                })
+                $thread.SetApartmentState([System.Threading.ApartmentState]::STA)
+                $thread.Start($state)
+                $thread.Join()
+                $selectedPath = $state.SelectedPath
+                $payload = @{ directoryPath = $selectedPath }
+                $json = ConvertTo-Json $payload -Compress
+                Send-TextResponse $response $json 200 "application/json; charset=utf-8"
+            } catch {
+                Send-TextResponse $response (ConvertTo-Json @{ error = $_.Exception.Message } -Compress) 500 "application/json; charset=utf-8"
+            }
+            continue
+        }
+
         if ($request.HttpMethod -eq "POST" -and $request.Url.AbsolutePath -eq "/cancel") {
             $script:cancelFlag = $true
             Send-TextResponse $response "OK" 200 "text/plain; charset=utf-8"

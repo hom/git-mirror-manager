@@ -31,6 +31,7 @@
   <div>
     <button id="run">执行拉取</button>
     <button id="runStream">流式拉取</button>
+    <button id="pick">选择目录</button>
     <button id="stop" disabled>停止</button>
     <span id="status" class="status"></span>
   </div>
@@ -42,6 +43,7 @@
   const $run = document.getElementById('run');
   const $runStream = document.getElementById('runStream');
   const $stop = document.getElementById('stop');
+  const $pick = document.getElementById('pick');
   const $out = document.getElementById('output');
   const $status = document.getElementById('status');
   const $list = document.getElementById('list');
@@ -170,6 +172,21 @@
   }
 
   $runStream.addEventListener('click', runStream);
+
+  async function pickFolder(){
+    try {
+      const resp = await fetch('/pick-folder');
+      const data = await resp.json();
+      if (data && data.directoryPath) {
+        $dir.value = data.directoryPath;
+      } else {
+        alert('未选择任何目录');
+      }
+    } catch (e) {
+      alert('选择目录失败：' + (e.message || e));
+    }
+  }
+  $pick.addEventListener('click', pickFolder);
 
   async function stop(){
     try {
