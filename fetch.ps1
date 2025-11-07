@@ -1,4 +1,11 @@
-$directoryPath = Read-Host "Enter the directory path"
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$directoryPath
+)
+
+if (-not $directoryPath -or [string]::IsNullOrWhiteSpace($directoryPath)) {
+    $directoryPath = Read-Host "Enter the directory path"
+}
 
 function Run-Fetch($folder)
 {
@@ -6,13 +13,13 @@ function Run-Fetch($folder)
         $currentBranch = (git -C $folder.FullName branch --show-current).Trim()
         git -C $folder.FullName pull origin $currentBranch --rebase
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "Git pull successful."
+            Write-Output "[$($folder.FullName)] Git pull successful."
         } else {
-            Write-Host "Git pull failed."
+            Write-Output "[$($folder.FullName)] Git pull failed."
         }
     } else {
-        Write-Host $folder.FullName
-        Write-Host "The current directory is not a Git repository."
+        Write-Output $folder.FullName
+        Write-Output "The current directory is not a Git repository."
         Map-Fetch $folder.GetDirectories()
     }
 }
