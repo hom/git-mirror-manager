@@ -19,18 +19,15 @@ function Send-TextResponse([System.Net.HttpListenerResponse]$resp, [string]$text
 }
 
 function Send-SseEvent([System.Net.HttpListenerResponse]$resp, [string]$eventName, $payload) {
-    $resp.ContentType = "text/event-stream"
-    $resp.StatusCode = 200
-    $resp.SendChunked = $true
-    $resp.KeepAlive = $true
-    $resp.Headers.Remove("Cache-Control")
-    $resp.Headers.Add("Cache-Control","no-cache")
-
-    $json = ($payload | ConvertTo-Json -Depth 6 -Compress)
-    $frame = "event: $eventName`n" + "data: $json`n`n"
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($frame)
-    $resp.OutputStream.Write($bytes,0,$bytes.Length)
-    try { $resp.OutputStream.Flush() } catch {}
+    try {
+        $json = ($payload | ConvertTo-Json -Depth 6 -Compress)
+        $frame = "event: $eventName`ndata: $json`n`n"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($frame)
+        $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+        $resp.OutputStream.Flush()
+    } catch {
+        Write-Host "Error sending SSE event: $_"
+    }
 }
 
 function Walk-And-Pull([System.Net.HttpListenerResponse]$resp, [string]$rootDir) {
@@ -259,21 +256,36 @@ if ($folder) {
         }
 
         if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/fetch-stream") {
+            Write-Host "Fetch-stream requested"
             $dir = $request.QueryString["dir"]
+            
+            # Initialize SSE response
+            $response.ContentType = "text/event-stream; charset=utf-8"
+            $response.StatusCode = 200
+            $response.SendChunked = $true
+            $response.KeepAlive = $true
+            $response.Headers.Add("Cache-Control", "no-cache")
+            $response.Headers.Add("Connection", "keep-alive")
+            
             if (-not $dir -or [string]::IsNullOrWhiteSpace($dir)) {
+                Write-Host "Error: No directory specified"
                 Send-SseEvent $response 'error' @{ message = 'Query parameter "dir" is required.' }
                 $response.OutputStream.Close()
                 continue
             }
             if (-not (Test-Path -Path $dir)) {
+                Write-Host "Error: Directory not found: $dir"
                 Send-SseEvent $response 'error' @{ message = 'Directory not found.'; dir = $dir }
                 $response.OutputStream.Close()
                 continue
             }
+            
+            Write-Host "Starting fetch for: $dir"
             $script:cancelFlag = $false
             Send-SseEvent $response 'start' @{ dir = $dir; ts = (Get-Date).ToString('o') }
             Walk-And-Pull -resp $response -rootDir $dir
             Send-SseEvent $response 'done' @{ ts = (Get-Date).ToString('o') }
+            Write-Host "Fetch completed"
             $response.OutputStream.Close()
             continue
         }
