@@ -195,14 +195,54 @@ while ($true) {
 
         # Pick folder dialog endpoint (local UI on server host)
         if ($request.HttpMethod -eq "GET" -and $request.Url.AbsolutePath -eq "/pick-folder") {
+            Write-Host "Folder picker requested..."
             try {
-                $cmd = 'Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; $dlg.Description = "选择根目录"; $dlg.ShowNewFolderButton = $false; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }'
-                $selectedPath = (powershell -STA -NoProfile -ExecutionPolicy Bypass -Command $cmd | Select-Object -First 1)
-                $payload = @{ directoryPath = $selectedPath }
-                $json = ConvertTo-Json $payload -Compress
+                # Create a temporary script file to run the dialog with visible window
+                $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
+                $scriptContent = @'
+# Use Shell.Application COM object for folder picker
+$shell = New-Object -ComObject Shell.Application
+$folder = $shell.BrowseForFolder(0, "选择包含 Git 仓库的根目录", 0, 0)
+if ($folder) {
+    $folder.Self.Path
+}
+'@
+                [System.IO.File]::WriteAllText($tempScript, $scriptContent, [System.Text.Encoding]::UTF8)
+                
+                # Run the dialog with visible window (UseShellExecute = $true)
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = "powershell.exe"
+                $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -File `"$tempScript`""
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.CreateNoWindow = $false
+                
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $selectedPath = $proc.StandardOutput.ReadToEnd().Trim()
+                $stderr = $proc.StandardError.ReadToEnd()
+                $proc.WaitForExit(30000) # 30 second timeout
+                
+                # Clean up temp file
+                try { Remove-Item $tempScript -Force -ErrorAction SilentlyContinue } catch {}
+                
+                if ($stderr) {
+                    Write-Host "Stderr: $stderr"
+                }
+                
+                if ($selectedPath -and $selectedPath.Length -gt 0) {
+                    Write-Host "Selected: $selectedPath"
+                    $json = ConvertTo-Json @{ directoryPath = $selectedPath } -Compress
+                } else {
+                    Write-Host "No folder selected or cancelled"
+                    $json = ConvertTo-Json @{ directoryPath = "" } -Compress
+                }
+                
                 Send-TextResponse $response $json 200 "application/json; charset=utf-8"
             } catch {
-                Send-TextResponse $response (ConvertTo-Json @{ error = $_.Exception.Message } -Compress) 500 "application/json; charset=utf-8"
+                Write-Host "Error: $($_.Exception.Message)"
+                $json = ConvertTo-Json @{ directoryPath = ""; error = $_.Exception.Message } -Compress
+                Send-TextResponse $response $json 200 "application/json; charset=utf-8"
             }
             continue
         }
