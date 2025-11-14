@@ -8,7 +8,7 @@ if (-not $directoryPath -or [string]::IsNullOrWhiteSpace($directoryPath)) {
 }
 
 try {
-    $env:LANG = "en_US.UTF-8"
+    $env:LANG = "zh_CN.UTF-8"
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
@@ -22,13 +22,13 @@ function Run-Fetch($folder)
     $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
     
     if (Test-Path -Path $gitPath) {
-        $repoPath = $folder.FullName
+        $repositoryPath = $folder.FullName
         Write-Output "========================================"
-        Write-Output $repoPath
+        Write-Output $repositoryPath
         
         try {
             # Check for uncommitted changes
-            $status = & git -C $repoPath status --porcelain 2>&1
+            $status = & git -C $repositoryPath status --porcelain 2>&1
             if ($status -and $status.Length -gt 0) {
                 Write-Output "! 检测到未提交的更改，跳过拉取"
                 $script:skippedCount++
@@ -36,9 +36,9 @@ function Run-Fetch($folder)
             }
 
             # Detect current branch
-            $currentBranch = (& git -C $repoPath branch --show-current 2>&1).Trim()
+            $currentBranch = (& git -C $repositoryPath branch --show-current 2>&1).Trim()
             if (-not $currentBranch -or [string]::IsNullOrWhiteSpace($currentBranch)) {
-                $currentBranch = (& git -C $repoPath rev-parse --abbrev-ref HEAD 2>&1).Trim()
+                $currentBranch = (& git -C $repositoryPath rev-parse --abbrev-ref HEAD 2>&1).Trim()
             }
             
             if ($currentBranch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($currentBranch)) {
@@ -50,7 +50,7 @@ function Run-Fetch($folder)
             Write-Output "当前分支: $currentBranch"
 
             # Check if remote exists
-            $remotes = & git -C $repoPath remote 2>&1
+            $remotes = & git -C $repositoryPath remote 2>&1
             if (-not $remotes -or $remotes.Length -eq 0) {
                 Write-Output "! 没有配置远程仓库，跳过"
                 $script:skippedCount++
@@ -59,7 +59,7 @@ function Run-Fetch($folder)
 
             # Run git fetch
             Write-Output "正在执行 git fetch..."
-            $fetchOutput = & git -C $repoPath fetch origin 2>&1
+            $fetchOutput = & git -C $repositoryPath fetch origin $(git branch --show-current) 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Output "Fetch 失败: $fetchOutput"
                 $script:failedCount++
@@ -71,8 +71,8 @@ function Run-Fetch($folder)
             }
 
             # Check if pull is needed
-            $localCommit = (& git -C $repoPath rev-parse $currentBranch 2>&1).Trim()
-            $remoteCommit = (& git -C $repoPath rev-parse "origin/$currentBranch" 2>&1).Trim()
+            $localCommit = (& git -C $repositoryPath rev-parse $currentBranch 2>&1).Trim()
+            $remoteCommit = (& git -C $repositoryPath rev-parse "origin/$currentBranch" 2>&1).Trim()
             
             if ($localCommit -eq $remoteCommit) {
                 Write-Output "v 已是最新，无需拉取"
@@ -82,7 +82,7 @@ function Run-Fetch($folder)
 
             # Run git pull with rebase
             Write-Output "正在执行 git pull --rebase..."
-            $pullOutput = & git -C $repoPath pull origin $currentBranch --rebase 2>&1
+            $pullOutput = & git -C $repositoryPath pull origin $currentBranch --rebase 2>&1
             $exitCode = $LASTEXITCODE
             
             if ($pullOutput) {
