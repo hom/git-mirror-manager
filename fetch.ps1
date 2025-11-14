@@ -47,7 +47,7 @@ function Run-Fetch($folder)
                 return
             }
 
-            Write-Output "📌 当前分支: $currentBranch"
+            Write-Output "当前分支: $currentBranch"
 
             # Check if remote exists
             $remotes = & git -C $repoPath remote 2>&1
@@ -58,10 +58,10 @@ function Run-Fetch($folder)
             }
 
             # Run git fetch
-            Write-Output "🔄 正在执行 git fetch..."
+            Write-Output "正在执行 git fetch..."
             $fetchOutput = & git -C $repoPath fetch origin 2>&1
             if ($LASTEXITCODE -ne 0) {
-                Write-Output "❌ Fetch 失败: $fetchOutput"
+                Write-Output "Fetch 失败: $fetchOutput"
                 $script:failedCount++
                 return
             }
@@ -75,13 +75,13 @@ function Run-Fetch($folder)
             $remoteCommit = (& git -C $repoPath rev-parse "origin/$currentBranch" 2>&1).Trim()
             
             if ($localCommit -eq $remoteCommit) {
-                Write-Output "✓ 已是最新，无需拉取"
+                Write-Output "v 已是最新，无需拉取"
                 $script:successCount++
                 return
             }
 
             # Run git pull with rebase
-            Write-Output "🔄 正在执行 git pull --rebase..."
+            Write-Output "正在执行 git pull --rebase..."
             $pullOutput = & git -C $repoPath pull origin $currentBranch --rebase 2>&1
             $exitCode = $LASTEXITCODE
             
@@ -90,14 +90,14 @@ function Run-Fetch($folder)
             }
 
             if ($exitCode -eq 0) {
-                Write-Output "✓ 拉取成功"
+                Write-Output "v 拉取成功"
                 $script:successCount++
             } else {
-                Write-Output "❌ 拉取失败 (退出码: $exitCode)"
+                Write-Output "x 拉取失败 (退出码: $exitCode)"
                 $script:failedCount++
             }
         } catch {
-            Write-Output "❌ 异常: $($_.Exception.Message)"
+            Write-Output "x 异常: $($_.Exception.Message)"
             $script:failedCount++
         }
     } else {
