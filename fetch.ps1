@@ -7,6 +7,12 @@ if (-not $directoryPath -or [string]::IsNullOrWhiteSpace($directoryPath)) {
     $directoryPath = Read-Host "Enter the directory path"
 }
 
+try {
+    $env:LANG = "en_US.UTF-8"
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
+
 $script:successCount = 0
 $script:failedCount = 0
 $script:skippedCount = 0
@@ -17,13 +23,14 @@ function Run-Fetch($folder)
     
     if (Test-Path -Path $gitPath) {
         $repoPath = $folder.FullName
-        Write-Output "`n========================================`n[$repoPath]"
+        Write-Output "========================================"
+        Write-Output $repoPath
         
         try {
             # Check for uncommitted changes
             $status = & git -C $repoPath status --porcelain 2>&1
             if ($status -and $status.Length -gt 0) {
-                Write-Output "⚠️  检测到未提交的更改，跳过拉取"
+                Write-Output "! 检测到未提交的更改，跳过拉取"
                 $script:skippedCount++
                 return
             }
@@ -35,7 +42,7 @@ function Run-Fetch($folder)
             }
             
             if ($currentBranch -eq 'HEAD' -or [string]::IsNullOrWhiteSpace($currentBranch)) {
-                Write-Output "⚠️  分离的 HEAD 状态，跳过"
+                Write-Output "! 分离的 HEAD 状态，跳过"
                 $script:skippedCount++
                 return
             }
@@ -45,7 +52,7 @@ function Run-Fetch($folder)
             # Check if remote exists
             $remotes = & git -C $repoPath remote 2>&1
             if (-not $remotes -or $remotes.Length -eq 0) {
-                Write-Output "⚠️  没有配置远程仓库，跳过"
+                Write-Output "! 没有配置远程仓库，跳过"
                 $script:skippedCount++
                 return
             }
@@ -122,9 +129,8 @@ $elapsed = ($endTime - $startTime).TotalSeconds
 Write-Output "========================================"
 Write-Output "📊 统计信息"
 Write-Output "========================================"
-Write-Output "✓ 成功: $($script:successCount)"
-Write-Output "❌ 失败: $($script:failedCount)"
-Write-Output "⚠️  跳过: $($script:skippedCount)"
-Write-Output "📁 总计: $($script:successCount + $script:failedCount + $script:skippedCount)"
-Write-Output "⏱️  耗时: $([math]::Round($elapsed, 2)) 秒"
+Write-Output "v 成功: $($script:successCount)"
+Write-Output "x 失败: $($script:failedCount)"
+Write-Output "!  跳过: $($script:skippedCount)"
+Write-Output "总计: $($script:successCount + $script:failedCount + $script:skippedCount)"
 Write-Output "========================================"
