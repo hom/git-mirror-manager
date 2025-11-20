@@ -1,27 +1,38 @@
 $directoryPath = Read-Host "Enter the directory path"
 
-function Run-Fetch($folder)
-{
-    if (Test-Path -Path (Join-Path -Path $folder.FullName -ChildPath ".git")) {
+$stats = @{ Success = 0; Failed = 0; Skipped = 0 }
+
+function Run-Fetch($folder) {
+    $gitPath = Join-Path -Path $folder.FullName -ChildPath ".git"
+    
+    if (Test-Path -Path $gitPath) {
         $currentBranch = (git -C $folder.FullName branch --show-current).Trim()
-        git -C $folder.FullName pull origin $currentBranch --rebase
+        
+        Write-Host "[$folder] " -NoNewline -ForegroundColor Cyan
+        git -C $folder.FullName pull origin $currentBranch --rebase 2>&1 | Out-Null
+        
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "Git pull successful."
+            Write-Host "V" -ForegroundColor Green
+            $script:stats.Success++
         } else {
-            Write-Host "Git pull failed."
+            Write-Host "X" -ForegroundColor Red
+            $script:stats.Failed++
         }
     } else {
-        Write-Host $folder.FullName
-        Write-Host "The current directory is not a Git repository."
+        $script:stats.Skipped++
         Map-Fetch $folder.GetDirectories()
     }
 }
 
-function Map-Fetch($folders)
-{
+function Map-Fetch($folders) {
     foreach ($folder in $folders) {
-        Run-Fetch($folder)
+        Run-Fetch $folder
     }
 }
 
-Map-Fetch(Get-ChildItem -Path $directoryPath -Directory)
+Map-Fetch (Get-ChildItem -Path $directoryPath -Directory)
+
+Write-Host "`n统计: " -NoNewline
+Write-Host "成功 $($stats.Success) " -NoNewline -ForegroundColor Green
+Write-Host "失败 $($stats.Failed) " -NoNewline -ForegroundColor Red
+Write-Host "跳过 $($stats.Skipped)" -ForegroundColor Yellow
