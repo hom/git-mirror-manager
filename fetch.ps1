@@ -1,4 +1,8 @@
-$directoryPath = Read-Host "Enter the directory path"
+﻿# Set UTF-8 encoding for proper display of Chinese characters
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+$directory = Read-Host "Enter the directory path"
 
 $stats = @{ Success = 0; Failed = 0; Skipped = 0 }
 
@@ -12,10 +16,10 @@ function Run-Fetch($folder) {
         git -C $folder.FullName pull origin $currentBranch --rebase 2>&1 | Out-Null
         
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "V" -ForegroundColor Green
+            Write-Host "[OK]" -ForegroundColor Green
             $script:stats.Success++
         } else {
-            Write-Host "X" -ForegroundColor Red
+            Write-Host "[FAIL]" -ForegroundColor Red
             $script:stats.Failed++
         }
     } else {
@@ -30,7 +34,7 @@ function Map-Fetch($folders) {
     }
 }
 
-Map-Fetch (Get-ChildItem -Path $directoryPath -Directory)
+Map-Fetch (Get-ChildItem -Path $directory -Directory)
 
 Write-Host "`n统计: " -NoNewline
 Write-Host "成功 $($stats.Success) " -NoNewline -ForegroundColor Green
